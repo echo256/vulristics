@@ -1,3 +1,3 @@
-nvd_key = ""
-vulners_key = ""
+nvd_key = "e60e7b27-c775-4a72-8ddb-5f34ccb9ea69"
+vulners_key = "H7E35EMMNX2LJ6G048ZOMK2CI87OLQO8AI5YK9X0JVGEQT4TPS7YYY857XZ9FH3P"
 proxies = {}

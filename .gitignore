@@ -12,3 +12,4 @@ data/vulners_exploit/*
 report/*.html
 reports/*.html
 credentials.py
+data/*

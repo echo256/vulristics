@@ -1,5 +1,7 @@
 import requests
 import time
+import re
+from credentials import nvd_key
 
 # =====================
 #  Validation helpers
@@ -138,3 +140,76 @@ def search_cves_by_cpe(cpe_string: str, max_results: int = 1000, vulners_api_key
     all_cves.update(search_cves_vulners(cpe_string, api_key=vulners_api_key))
     all_cves.update(search_cves_osv(cpe_string))
     return sorted(all_cves)
+
+
+def get_cpe_candidates(product_with_version: str, api_key: str | None = None) -> set[str]:
+    """
+    Поиск CPE по строке "<product> [<version>]" через NVD CPE API v2.
+    Если версия указана → фильтруем по ней.
+    Если версия не указана → возвращаем все CPE для продукта.
+
+    :param product_with_version: строка вида "haproxy 2.5.2" или "red hat linux"
+    :param api_key: NVD API key (если есть). Если None → берём из credentials.py
+    :return: set найденных CPE
+    """
+
+    if api_key is None:
+        api_key = nvd_key
+
+    # --- Шаг 1. Разделяем имя продукта и версию (версия опциональна) ---
+    tokens = product_with_version.strip().split()
+    if not tokens:
+        raise ValueError("Пустая строка продукта")
+
+    if len(tokens) == 1:
+        product = tokens[0]
+        version = None
+    else:
+        # предполагаем, что последняя "токен" — это версия, если она выглядит как версия
+        if re.match(r"^[0-9][\w\.\-]*$", tokens[-1]):
+            product = " ".join(tokens[:-1])
+            version = tokens[-1]
+        else:
+            product = " ".join(tokens)
+            version = None
+
+    print(f"[INFO] Ищу CPE для продукта='{product}'" + (f", версии='{version}'" if version else ""))
+
+    # --- Шаг 2. Запрос к NVD API ---
+    url = "https://services.nvd.nist.gov/rest/json/cpes/2.0"
+    params = {"keywordSearch": product}
+    headers = {}
+    if api_key:
+        headers["apiKey"] = api_key
+
+    try:
+        resp = requests.get(url, params=params, headers=headers, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.exceptions.RequestException as e:
+        print(f"[ERROR] Запрос к NVD API завершился ошибкой: {e}")
+        return set()
+
+    # --- Шаг 3. Парсим результат ---
+    cpes = set()
+    for item in data.get("products", []):
+        cpe_name = item.get("cpe", {}).get("cpeName")
+        if not cpe_name:
+            continue
+        if version:
+            parts = cpe_name.split(":")
+            if len(parts) > 5 and parts[5] == version:
+                cpes.add(cpe_name)
+        else:
+            cpes.add(cpe_name)
+
+    if not cpes:
+        if version:
+            print(f"[WARN] Для '{product} {version}' ничего не найдено в CPE API")
+        else:
+            print(f"[WARN] Для '{product}' ничего не найдено в CPE API")
+    else:
+        print(f"[INFO] Найдено {len(cpes)} совпадений")
+
+    return cpes
+
