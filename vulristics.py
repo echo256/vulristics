@@ -1,5 +1,5 @@
 from vulristics_code import functions_report_vulnerabilities, functions_report_ms_patch_tuesday, functions_profile
-from vulristics_code.functions_cpe_search import validate_cpe, search_cves_by_cpe
+from vulristics_code.functions_cpe_search import validate_cpe, search_cves_by_cpe, get_cpe_candidates
 import re
 import requests
 import json
@@ -12,7 +12,7 @@ current_version = "1.0.10"
 parser = argparse.ArgumentParser(description='An extensible framework for analyzing publicly available information about vulnerabilities')
 const = ""
 
-parser.add_argument('--report-type', help='Report type (ms_patch_tuesday, ms_patch_tuesday_extended, cve_list, cpe_search or custom_profile)')
+parser.add_argument('--report-type', help='Report type (ms_patch_tuesday, ms_patch_tuesday_extended, cve_list, cpe_search, product_search or custom_profile)')
 parser.add_argument('--mspt-year', help='Microsoft Patch Tuesday year')
 parser.add_argument('--mspt-month', help='Microsoft Patch Tuesday month')
 parser.add_argument('--mspt-comments-links-path', help='Microsoft Patch Tuesday comments links file. Format: "Qualys|Description|URL"')
@@ -20,8 +20,10 @@ parser.add_argument('--cve-project-name', help='Name of the CVE Project')
 parser.add_argument('--cve-list-path', help='Path to the list of CVE IDs (each per line)')
 parser.add_argument('--cve-comments-path', help='Path to the CVE comments file (optional)')
 parser.add_argument('--cve-data-sources', help='Data sources for analysis, e.g. "ms,nvd,bdu,epss,vulners,attackerkb,bdu,custom" (default: "ms,nvd,epss,vulners,attackerkb,bdu,custom")', default='ms,nvd,epss,vulners,attackerkb,bdu,custom')
-parser.add_argument('--cpe', help='Single CPE identifier for vulnerability search')
-parser.add_argument('--cpe-list', help='Path to file with CPE identifiers (one per line)')
+parser.add_argument('--cpe', help='[DEPRECATED] Single CPE identifier for vulnerability search')
+parser.add_argument('--cpe-list', help='[DEPRECATED] Path to file with CPE identifiers (one per line)')
+parser.add_argument('--product', help='Single product name with optional version (e.g., "nginx 1.20.1")')
+parser.add_argument('--product-list', help='Path to file with product names (one per line)')
 parser.add_argument('--profile-json-path', help='Custom profile for analysis')
 parser.add_argument('--result-formats', help='Result formats, e.g. "html,json", Default - "html"')
 parser.add_argument('--result-html-path', help='Path to the results file in html format (Default - will be created in reports directory)')
@@ -152,6 +154,120 @@ def process_cpe_search():
         if os.path.exists(temp_cve_file.name):
             os.unlink(temp_cve_file.name)
 
+
+def process_product_search():
+    """Process product search and generate CVE report"""
+    product_list = []
+    
+    # Collect products from arguments
+    if args.product:
+        product_list.append(args.product.strip())
+    
+    if args.product_list:
+        try:
+            with open(args.product_list, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        product_list.append(line)
+        except FileNotFoundError:
+            print(f"Error: Product list file not found: {args.product_list}")
+            return
+        except Exception as e:
+            print(f"Error reading product list file: {e}")
+            return
+    
+    if not product_list:
+        print("Error: No products provided")
+        return
+    
+    print(f"Processing {len(product_list)} product(s)...")
+    
+    # Convert products to CPEs and search CVEs
+    all_cves = set()
+    product_to_cpes = {}
+    
+    for product_name in product_list:
+        try:
+            cpe_candidates = get_cpe_candidates(product_name)
+            product_to_cpes[product_name] = cpe_candidates
+            
+            if not cpe_candidates:
+                print(f"Warning: No CPEs found for product '{product_name}'")
+                continue
+            
+            print(f"Product '{product_name}': found {len(cpe_candidates)} CPE(s)")
+            
+            # Search CVEs for all CPE candidates
+            product_cves = set()
+            for cpe in cpe_candidates:
+                cves = search_cves_by_cpe(cpe)
+                product_cves.update(cves)
+            
+            all_cves.update(product_cves)
+            print(f"Product '{product_name}': found {len(product_cves)} unique CVEs")
+            
+        except Exception as e:
+            print(f"Error processing product '{product_name}': {e}")
+            continue
+    
+    if not all_cves:
+        print("No CVEs found for provided product(s)")
+        return
+    
+    print(f"Total unique CVEs found across all products: {len(all_cves)}")
+    
+    # Generate project name
+    if args.cve_project_name:
+        project_name = args.cve_project_name
+    else:
+        if len(product_list) == 1:
+            # Use product name for project name
+            clean_product_name = re.sub(r'[^a-zA-Z0-9_\s]', '', product_list[0])
+            project_name = re.sub(r'\s+', '_', clean_product_name.strip()).lower() + "_product_analysis"
+        else:
+            project_name = f"multiple_product_analysis_{len(product_list)}_products"
+    
+    # Create comments with product and CPE information
+    comments = {
+        'Product Analysis': f"Analysis based on {len(product_list)} product(s):\n"
+    }
+    
+    for product_name, cpes in product_to_cpes.items():
+        if cpes:
+            comments['Product Analysis'] += f"\n• {product_name}:\n"
+            for cpe in sorted(cpes):
+                comments['Product Analysis'] += f"  - {cpe}\n"
+        else:
+            comments['Product Analysis'] += f"\n• {product_name}: No CPEs found\n"
+    
+    comments['Product Analysis'] += f"\nTotal unique CVEs found: {len(all_cves)}"
+    
+    # Generate report using existing functionality
+    name = project_name
+    report_name = name + ' report'
+    file_name_prefix = re.sub(" ","_",name).lower()
+    
+    cve_list_text = '\n'.join(sorted(all_cves))
+    products_text = ""
+    
+    file_name = name + "_profile.json"
+    report_id = name + "_report"
+    
+    profile_file_path = "data/profiles/" + file_name
+    functions_profile.save_profile(profile_file_path=profile_file_path,
+                                   report_id=report_id,
+                                   report_name=report_name,
+                                   file_name_prefix=file_name_prefix,
+                                   cve_list_text=cve_list_text,
+                                   products_text=products_text,
+                                   data_sources=source_config['data_sources'],
+                                   comments=comments)
+    
+    functions_report_vulnerabilities.make_vulnerability_report_for_profile(profile_file_path=profile_file_path,
+                                                                           source_config=source_config,
+                                                                           result_config=result_config)
+
 source_config = dict()
 
 source_config['rewrite_flag'] = False
@@ -221,7 +337,16 @@ if args.report_type == "ms_patch_tuesday" or args.report_type == "ms_patch_tuesd
                                                                    result_config=result_config)
 
 elif args.report_type == "cpe_search":
+    # Check for deprecated CPE parameter usage and show warnings
+    if args.cpe or args.cpe_list:
+        print("[DEPRECATION WARNING] The --cpe and --cpe-list parameters are deprecated.")
+        print("Please use --product and --product-list instead for better usability.")
+        print("Example: Instead of --cpe 'cpe:/a:nginx:nginx:1.20.1', use --product 'nginx 1.20.1'")
+        print("")
     process_cpe_search()
+
+elif args.report_type == "product_search":
+    process_product_search()
 
 elif args.report_type == "cve_list":
 
@@ -279,6 +404,11 @@ else:
     print('# Microsoft Patch Tuesday analysis:')
     print('$ python3 vulristics.py --report-type "ms_patch_tuesday" --mspt-year 2024 --mspt-month "August"')
     print('')
-    print('# CPE-based vulnerability search:')
+    print('# CPE-based vulnerability search (deprecated, use product_search instead):')
     print('$ python3 vulristics.py --report-type "cpe_search" --cpe "cpe:/a:apache:tomcat:9.0.0"')
     print('$ python3 vulristics.py --report-type "cpe_search" --cpe-list "cpe_list.txt" --cve-project-name "My CPE Analysis"')
+    print('')
+    print('# Product-based vulnerability search (recommended):')
+    print('$ python3 vulristics.py --report-type "product_search" --product "nginx 1.20.1"')
+    print('$ python3 vulristics.py --report-type "product_search" --product "apache http server"')
+    print('$ python3 vulristics.py --report-type "product_search" --product-list "products.txt" --cve-project-name "My Product Analysis"')
